@@ -17,8 +17,122 @@
  */
 #include "sched.h"
 #include "pelt.h"
+#include <linux/rmap.h>
 
 struct dl_bandwidth def_dl_bandwidth;
+
+enum dl_state {
+       MEET_DEADLINE,
+       MISS_DEADLINE,
+};
+
+enum pin_list_adjustment {
+       LIST_SHRINK,
+       LIST_INCREASE,
+       LIST_KEEP,
+};
+
+/**
+ * zhengwei_thesis
+ * try_decrease_budget - shrink the swap budget
+ * @dl_se: the soft real-time task
+ */
+void try_decrease_budget(struct sched_dl_entity *dl_se)
+{
+       if (dl_se->add_budget > 0) {
+               dl_se->add_budget = dl_se->add_budget * 19 / 20;
+       }
+}
+
+/**
+ * zhengwei_thesis
+ * try_decrease_budget - increase the swap budget
+ * @dl_se: the soft real-time task
+ *
+ * Check whether the add_budget(swap-budget) will make the runtime larger than the period.
+ * If not, we can increase the add_budget(swap_budget).
+ */
+void try_increase_budget(struct sched_dl_entity *dl_se)
+{
+       if (dl_se->dl_major_fault <= 0) return;
+       if ((dl_se->add_budget + (dl_se->dl_major_fault << DL_SCALE >> 2) + dl_se->dl_runtime) < (dl_se->dl_deadline * 9 / 10))
+               dl_se->add_budget = dl_se->add_budget + (dl_se->dl_major_fault << DL_SCALE >> 2);
+}
+
+/**
+ * zhengwei_thesis
+ * check_adjust_pin_control - determine how to adjust the pin page set according to the
+ * the status of the soft real-time task.
+ * @pin_page_control: the pin page set
+ * @dl_se: the soft real-time task
+ * @dl_state: the status of the soft real-time task
+ */
+enum pin_list_adjustment
+check_adjust_pin_control(struct pin_page_control *pin_page_control,
+                                                struct sched_dl_entity *dl_se,
+                                                enum dl_state dl_state)
+{
+       enum pin_list_adjustment res;
+       u64 used_left, used_right;
+
+       switch (dl_state) {
+               case MEET_DEADLINE:
+                       used_left = ((dl_se->dl_runtime - dl_se->runtime + dl_se->add_budget) >> DL_SCALE) * 10;
+                       used_right = ((dl_se->dl_runtime + dl_se->add_budget) >> DL_SCALE) * 7;
+                       if (used_left < used_right) {
+                               res = LIST_SHRINK;
+                       } else {
+                               res = LIST_KEEP;
+                       }
+                       break;
+               case  MISS_DEADLINE:
+                       if (dl_se->dl_major_fault > 0) {
+                               res = LIST_INCREASE;
+                       } else {
+                               res = LIST_KEEP;
+                       }
+       }
+       return res;
+}
+
+/**
+ * zhengwei_thesis
+ * update_pin_page_control - update the pin capacity in the pin page set
+ * @pin_page_control: the pin page set
+ * @dl_se: the soft real-time task
+ * @adjustment: the adjustment to the pin capacity
+ */
+void update_pin_page_control(struct pin_page_control *pin_page_control,
+                                                       struct sched_dl_entity *dl_se,
+                                               enum pin_list_adjustment adjustment)
+{
+       spin_lock(&pin_page_control->pin_page_lock);
+       switch (adjustment) {
+               case LIST_SHRINK:
+                       pin_page_control->max_pin_pages = pin_page_control->max_pin_pages * 9 / 10;
+                       break;
+               case LIST_INCREASE:
+                       pin_page_control->max_pin_pages = pin_page_control->max_pin_pages + dl_se->dl_major_fault;
+                       break;
+               default:
+                       break;
+       }
+       spin_unlock(&pin_page_control->pin_page_lock);
+}
+
+/**
+ * zhengwei_thesis
+ * reset_pin_page_info - clear the number of major fault of soft real-time task
+ * @dl_se: the soft real-time task
+ * @pin_page_control: the pin page set
+ */
+void reset_pin_page_info(struct sched_dl_entity *dl_se, struct pin_page_control *pin_page_control)
+{
+       spin_lock(&pin_page_control->pin_page_lock);
+       //printk("dl_se->dl_major_fault %d\n", dl_se->dl_major_fault);
+       dl_se->dl_major_fault = 0;
+       spin_unlock(&pin_page_control->pin_page_lock);
+}
 
 static inline struct task_struct *dl_task_of(struct sched_dl_entity *dl_se)
 {
@@ -788,7 +902,8 @@ static void replenish_dl_entity(struct sched_dl_entity *dl_se)
 	if (dl_se->dl_deadline == 0) {
 		dl_se->deadline = rq_clock(rq) + pi_of(dl_se)->dl_deadline;
 		dl_se->runtime = pi_of(dl_se)->dl_runtime;
-	}
+	    dl_se->runtime += pi_of(dl_se)->add_budget;
+    }
 
 	if (dl_se->dl_yielded && dl_se->runtime > 0)
 		dl_se->runtime = 0;
@@ -802,6 +917,7 @@ static void replenish_dl_entity(struct sched_dl_entity *dl_se)
 	while (dl_se->runtime <= 0) {
 		dl_se->deadline += pi_of(dl_se)->dl_period;
 		dl_se->runtime += pi_of(dl_se)->dl_runtime;
+		dl_se->runtime += pi_of(dl_se)->add_budget;
 	}
 
 	/*
@@ -873,7 +989,7 @@ static bool dl_entity_overflow(struct sched_dl_entity *dl_se, u64 t)
 	 */
 	left = (pi_of(dl_se)->dl_deadline >> DL_SCALE) * (dl_se->runtime >> DL_SCALE);
 	right = ((dl_se->deadline - t) >> DL_SCALE) *
-		(pi_of(dl_se)->dl_runtime >> DL_SCALE);
+		((pi_of(dl_se)->dl_runtime + pi_of(dl_se)->add_budget) >> DL_SCALE);
 
 	return dl_time_before(right, left);
 }
@@ -965,7 +1081,7 @@ static void update_dl_entity(struct sched_dl_entity *dl_se)
 
 	if (dl_time_before(dl_se->deadline, rq_clock(rq)) ||
 	    dl_entity_overflow(dl_se, rq_clock(rq))) {
-
+		enum pin_list_adjustment pin_list_adjustment;
 		if (unlikely(!dl_is_implicit(dl_se) &&
 			     !dl_time_before(dl_se->deadline, rq_clock(rq)) &&
 			     !is_dl_boosted(dl_se))) {
@@ -973,9 +1089,43 @@ static void update_dl_entity(struct sched_dl_entity *dl_se)
 			return;
 		}
 
+       if (!dl_time_before(dl_se->deadline, rq_clock(rq))) {
+            /*
+             * The soft real-time task misses the deadline, and try to adjust the pin capacity for
+             * the pin page set
+             */
+            pin_list_adjustment = check_adjust_pin_control(&dl_se->pin_page_control_anon,
+                                                            dl_se,
+                                                        	MISS_DEADLINE);
+            update_pin_page_control(&dl_se->pin_page_control_anon, dl_se, pin_list_adjustment);
+
+            pin_list_adjustment = check_adjust_pin_control(&dl_se->pin_page_control_file,
+                                                            dl_se,
+                                                            MISS_DEADLINE);
+            update_pin_page_control(&dl_se->pin_page_control_file, dl_se, pin_list_adjustment);
+        } else {
+            pin_list_adjustment = check_adjust_pin_control(&dl_se->pin_page_control_anon,
+                                                            dl_se,
+                                                            MEET_DEADLINE);
+            update_pin_page_control(&dl_se->pin_page_control_anon, dl_se, pin_list_adjustment);
+
+            pin_list_adjustment = check_adjust_pin_control(&dl_se->pin_page_control_file,
+                                                            dl_se,
+                                                            MEET_DEADLINE);
+            update_pin_page_control(&dl_se->pin_page_control_file, dl_se, pin_list_adjustment);
+            try_decrease_budget(dl_se);
+        }
+		/* Reset the last period and last budget if it is overflow or meet deadline. */
+
+    	reset_pin_page_info(dl_se, &dl_se->pin_page_control_anon);
+    	reset_pin_page_info(dl_se, &dl_se->pin_page_control_file);
+
 		dl_se->deadline = rq_clock(rq) + pi_of(dl_se)->dl_deadline;
 		dl_se->runtime = pi_of(dl_se)->dl_runtime;
-	}
+
+		/* Increase the runtime with add_budget. */
+        dl_se->runtime += pi_of(dl_se)->add_budget;
+    }
 }
 
 static inline u64 dl_next_period(struct sched_dl_entity *dl_se)
@@ -1314,8 +1464,28 @@ static void update_curr_dl(struct rq *rq)
 
 throttle:
 	if (dl_runtime_exceeded(dl_se) || dl_se->dl_yielded) {
-		dl_se->dl_throttled = 1;
+		/* Pin more pages if there are some page faults. */
+        enum pin_list_adjustment pin_page_adjustment;
 
+		dl_se->dl_throttled = 1;
+        if (dl_runtime_exceeded(dl_se)) {
+            /* If it runs out of the budget, we increase the swap budget */
+            pin_page_adjustment = check_adjust_pin_control(&dl_se->pin_page_control_anon,
+                                                        	dl_se,
+                                                            MISS_DEADLINE);
+            update_pin_page_control(&dl_se->pin_page_control_anon,
+                                                            dl_se,
+                                                            pin_page_adjustment);
+            pin_page_adjustment = check_adjust_pin_control(&dl_se->pin_page_control_file,
+                                                            dl_se,
+                                                            MISS_DEADLINE);
+            update_pin_page_control(&dl_se->pin_page_control_file,
+                                                            dl_se,
+                                                            pin_page_adjustment);
+            try_increase_budget(dl_se);
+            reset_pin_page_info(dl_se, &dl_se->pin_page_control_anon);
+            reset_pin_page_info(dl_se, &dl_se->pin_page_control_file);
+       	}
 		/* If requested, inform the user about runtime overruns. */
 		if (dl_runtime_exceeded(dl_se) &&
 		    (dl_se->flags & SCHED_FLAG_DL_OVERRUN))
@@ -2741,6 +2911,56 @@ int sched_dl_overflow(struct task_struct *p, int policy,
 void __setparam_dl(struct task_struct *p, const struct sched_attr *attr)
 {
 	struct sched_dl_entity *dl_se = &p->dl;
+ 	struct mm_struct *real_time_mm = p->mm;
+
+    /* set the anon_vma of soft real-time task to is_real_time */
+ 	if (real_time_mm != NULL) {
+ 		struct vm_area_struct *cur = real_time_mm->mmap;
+		while (cur != NULL) {
+			struct list_head *anon_vma_chain_head;
+            list_for_each(anon_vma_chain_head, &cur->anon_vma_chain) {
+			struct anon_vma_chain *avc = list_entry(anon_vma_chain_head, struct anon_vma_chain, same_vma);
+            if (avc != NULL) {
+                     avc->anon_vma->is_real_time = 1;
+                     avc->anon_vma->pin_page_control = &dl_se->pin_page_control_anon;
+                 }
+             }
+             cur = cur->vm_next;
+         }
+    }
+ 	if (real_time_mm != NULL) {
+         struct vm_area_struct *cur = real_time_mm->mmap;
+         while (cur != NULL) {
+            struct file *vm_file = cur->vm_file;
+            if (vm_file != NULL && vm_file->f_inode != NULL && vm_file->f_inode->i_mapping != NULL) {
+                vm_file->f_inode->i_mapping->is_real_time = 1;
+                vm_file->f_inode->i_mapping->pin_page_control = &dl_se->pin_page_control_file;
+            }
+            cur = cur->vm_next;
+        }
+	}
+
+    p->mm->is_real_time = 1;
+    /* set the default parameters */
+    dl_se->pin_page_control_anon.cur_pin_active_pages = 0;
+ 	dl_se->pin_page_control_anon.cur_pin_inactive_pages = 0;
+ 	dl_se->pin_page_control_anon.max_pin_pages = 7000;
+ 	dl_se->pin_page_control_anon.enqueued    = 1;
+ 	dl_se->pin_page_control_anon.list_division = 512;
+ 	dl_se->dl_major_fault = 0;
+ 	dl_se->add_budget = 0;
+    INIT_LIST_HEAD(&dl_se->pin_page_control_anon.pin_page_active_list);
+ 	INIT_LIST_HEAD(&dl_se->pin_page_control_anon.pin_page_inactive_list);
+
+ 	/* file */
+    dl_se->pin_page_control_file.cur_pin_active_pages = 0;
+ 	dl_se->pin_page_control_file.cur_pin_inactive_pages = 0;
+ 	dl_se->pin_page_control_file.max_pin_pages = 5000;
+ 	dl_se->pin_page_control_file.enqueued    = 1;
+ 	dl_se->pin_page_control_file.list_division = 30;
+ 	dl_se->dl_major_fault = 0;
+ 	INIT_LIST_HEAD(&dl_se->pin_page_control_file.pin_page_active_list);
+ 	INIT_LIST_HEAD(&dl_se->pin_page_control_file.pin_page_inactive_list);
 
 	dl_se->dl_runtime = attr->sched_runtime;
 	dl_se->dl_deadline = attr->sched_deadline;
@@ -2846,6 +3066,7 @@ void __dl_clear_params(struct task_struct *p)
 #ifdef CONFIG_RT_MUTEXES
 	dl_se->pi_se			= dl_se;
 #endif
+	dl_se->dl_major_fault = 0;
 }
 
 bool dl_param_changed(struct task_struct *p, const struct sched_attr *attr)

@@ -208,6 +208,12 @@ int __anon_vma_prepare(struct vm_area_struct *vma)
 		anon_vma_chain_link(vma, avc, anon_vma);
 		/* vma reference or self-parent link for new root */
 		anon_vma->degree++;
+ 		if (mm->owner != NULL && mm->owner->dl.dl_runtime > 0) {
+ 			anon_vma->is_real_time = 1;
+		} else {
+ 			anon_vma->is_real_time = 0;
+ 		}
+ 		anon_vma->pin_page_control = &mm->owner->dl.pin_page_control_anon;
 		allocated = NULL;
 		avc = NULL;
 	}
@@ -1033,7 +1039,7 @@ void page_move_anon_rmap(struct page *page, struct vm_area_struct *vma)
  * __page_set_anon_rmap - set up new anonymous rmap
  * @page:	Page or Hugepage to add to rmap
  * @vma:	VM area to add page to.
- * @address:	User virtual address of the mapping	
+ * @address:	User virtual address of the mapping
  * @exclusive:	the page is exclusively owned by the current process
  */
 static void __page_set_anon_rmap(struct page *page,

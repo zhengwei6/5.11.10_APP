@@ -506,6 +506,31 @@ struct sched_rt_entity {
 #endif
 } __randomize_layout;
 
+struct pin_page_control {
+	/* pin_page_active_list */
+    struct list_head pin_page_active_list;
+    /* pin_page_inactive_list */
+    struct list_head pin_page_inactive_list;
+	/* division value */
+	int division_value;
+    /* all the pages are in the same lruvec. */
+    struct lruvec *lruvec;
+    /* all the pages are in the same mem_cgroup. */
+    struct mem_cgroup *mem_cgroup;
+
+    /* count for how many pages are pinned currently. */
+    int cur_pin_active_pages;
+    int cur_pin_inactive_pages;
+	/* throttle the maximum pin pages. */
+	int max_pin_pages;
+    /* is enqueued */
+    bool enqueued;
+	/* number of scan chunks*/
+    int list_division;
+    /* spin lock for control*/
+    spinlock_t pin_page_lock;
+};
+
 struct sched_dl_entity {
 	struct rb_node			rb_node;
 
@@ -519,6 +544,7 @@ struct sched_dl_entity {
 	u64				dl_period;	/* Separation of two instances (period) */
 	u64				dl_bw;		/* dl_runtime / dl_period		*/
 	u64				dl_density;	/* dl_runtime / dl_deadline		*/
+	u64             add_budget;
 
 	/*
 	 * Actual scheduling parameters. Initialized with the values above,
@@ -557,6 +583,7 @@ struct sched_dl_entity {
 	unsigned int			dl_yielded        : 1;
 	unsigned int			dl_non_contending : 1;
 	unsigned int			dl_overrun	  : 1;
+	unsigned int            dl_major_fault;
 
 	/*
 	 * Bandwidth enforcement timer. Each -deadline task has its
@@ -572,6 +599,8 @@ struct sched_dl_entity {
 	 * time.
 	 */
 	struct hrtimer inactive_timer;
+	struct pin_page_control pin_page_control_anon;
+	struct pin_page_control pin_page_control_file;
 
 #ifdef CONFIG_RT_MUTEXES
 	/*

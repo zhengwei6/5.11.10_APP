@@ -1064,6 +1064,7 @@ static void page_check_dirty_writeback(struct page *page,
 		mapping->a_ops->is_dirty_writeback(page, dirty, writeback);
 }
 
+struct pin_page_control *is_real_time_file_page(struct page *page);
 /*
  * shrink_page_list() returns the number of reclaimed pages
  */
@@ -2001,6 +2002,171 @@ shrink_inactive_list(unsigned long nr_to_scan, struct lruvec *lruvec,
 }
 
 /*
+ * zhengwei_thesis
+ * del_victim_pages - insert the referenced pages to the pin page set and unpin the
+ * unreferenced pages from inactive list with a window size.
+ * @pin_page_control: the pin page set
+ * @insert_list: the LRU list
+ * @insert_active_list: the active list of the pin page set
+ */
+void del_victim_pages(struct pin_page_control *pin_page_control, struct list_head *insert_list, struct list_head *insert_active_list)
+{
+ 	int num_scan_chunk;
+ 	LIST_HEAD(l_hold);
+ 	struct list_head *cur_page_head;
+ 	bool find_victim = 0;
+ 	int cur_pin_pages;
+ 	int num_evict = 0, num_activate = 0, num_keep = 0;
+ 	struct page *page;
+ 	int num_scan_pages;
+
+ 	if (pin_page_control == NULL || insert_list == NULL)
+ 		return;
+ 	if (list_empty(&pin_page_control->pin_page_inactive_list)) return;
+
+	cur_pin_pages = pin_page_control->cur_pin_inactive_pages;
+	num_scan_pages = cur_pin_pages / pin_page_control->list_division;
+	for (cur_page_head = pin_page_control->pin_page_inactive_list.next; cur_page_head != (&(pin_page_control->pin_page_inactive_list));) {
+ 		int referenced_ptes, referenced_page;
+ 		unsigned long vm_flags;
+ 		if (num_scan_pages == 0) break;
+ 		page = list_entry(cur_page_head, struct page, lru);
+ 		cur_page_head = cur_page_head->next;
+ 		list_del(&page->lru);
+ 		referenced_ptes = page_referenced(page, 1, pin_page_control->mem_cgroup, &vm_flags);
+ 		if (referenced_ptes == 0) {
+ 			/* unpin */
+ 			list_add(&page->lru, insert_list);
+ 			pin_page_control->cur_pin_inactive_pages -= 1;
+ 			num_evict += 1;
+ 			find_victim = 1;
+		}
+ 		else {
+ 			/* keep */
+ 			list_add_tail(&page->lru, &pin_page_control->pin_page_inactive_list);
+ 			num_keep += 1;
+ 		}
+ 		num_scan_pages -= 1;
+ 	}
+ 	/* we will select the next entry as victim chunk if we don't find the victim chunk */
+ 	if (find_victim == 0 && !list_empty(&pin_page_control->pin_page_inactive_list)) {
+		page = list_entry(cur_page_head, struct page, lru);
+ 		list_del(&page->lru);
+ 		list_add(&page->lru, insert_active_list);
+ 		pin_page_control->cur_pin_inactive_pages -= 1;
+ 		num_activate += 1;
+ 		if (pin_page_control->list_division > 128)
+ 			pin_page_control->list_division = pin_page_control->list_division / 2;
+ 		return;
+ 	}
+ 	if (pin_page_control->list_division < 1024 && num_evict > num_keep) pin_page_control->list_division = pin_page_control->list_division * 2;
+	return;
+}
+
+/*
+ * zhengwei_thesis
+ * insert_page_to_control - insert the page into the pin page set
+ * @pin_page_control: the pin page set
+ * @page: the referenced page of soft real-time task
+ */
+void insert_page_to_control(struct pin_page_control *pin_page_control, struct page *page) {
+	/*
+ 	* Insert to the buffer and insert it to the list if the buffer is full.
+ 	*/
+	if (pin_page_control == NULL || page == NULL) return;
+	list_add_tail(&page->lru, &pin_page_control->pin_page_active_list);
+	pin_page_control->cur_pin_active_pages += 1;
+ 	return;
+}
+
+
+
+/*
+ * zhengwei_thesis
+ * drop - drop the pages from the pin page set until the number of pinned pages is
+ * smaller than the pin capacity
+ * @pin_page_control: the pin page set
+ * @insert_list: the LRU list
+ */
+void drop(struct pin_page_control *pin_page_control, struct list_head *insert_list)
+{
+ 	int cur_pin_pages;
+ 	int num_to_drop;
+ 	struct page *page;
+ 	struct list_head *cur_page_head;
+
+	cur_pin_pages = pin_page_control->cur_pin_inactive_pages + pin_page_control->cur_pin_active_pages;
+	num_to_drop = cur_pin_pages - pin_page_control->max_pin_pages;
+ 	if (num_to_drop <= 0) return;
+ 	for (cur_page_head = pin_page_control->pin_page_inactive_list.next; cur_page_head != (&(pin_page_control->pin_page_inactive_list)); num_to_drop -= 1) {
+ 		if (num_to_drop == 0) break;
+ 		page = list_entry(cur_page_head, struct page, lru);
+ 		cur_page_head = cur_page_head->next;
+ 		list_del(&page->lru);
+ 		list_add(&page->lru, insert_list);
+ 		pin_page_control->cur_pin_inactive_pages -= 1;
+ 	}
+ 	for (cur_page_head = pin_page_control->pin_page_active_list.next; cur_page_head != (&(pin_page_control->pin_page_active_list)); num_to_drop -= 1) {
+ 		if (num_to_drop == 0) break;
+ 		page = list_entry(cur_page_head, struct page, lru);
+ 		cur_page_head = cur_page_head->next;
+ 		list_del(&page->lru);
+ 		list_add(&page->lru, insert_list);
+ 		pin_page_control->cur_pin_active_pages -= 1;
+	}
+	return;
+}
+
+/*
+ * zhengwei_thesis
+ * balance - balance the pin page set to a fixed atio to accelerate the latency of
+ * scanning the unreferenced pages.
+ * @pin_page_control: the pin page set
+ */
+void balance(struct pin_page_control *pin_page_control)
+{
+ 	int cur_pin_pages;
+ 	int next_pin_active_pages;
+ 	int next_pin_inactive_pages;
+
+ 	LIST_HEAD(tmp);
+ 	if (pin_page_control == NULL) return;
+	cur_pin_pages = pin_page_control->cur_pin_inactive_pages + pin_page_control->cur_pin_active_pages;
+ 	if (cur_pin_pages == 0) return;
+ 	next_pin_inactive_pages = cur_pin_pages / 3;
+    next_pin_active_pages = cur_pin_pages - next_pin_inactive_pages;
+
+ 	if (next_pin_inactive_pages < pin_page_control->cur_pin_inactive_pages) {
+ 		struct list_head *cur = pin_page_control->pin_page_inactive_list.next;
+ 		int diff = pin_page_control->cur_pin_inactive_pages - next_pin_inactive_pages;
+ 		diff -= 1;
+ 		while (diff != 0) {
+ 			cur = cur->next;
+ 			diff -= 1;
+ 		}
+ 		list_cut_position(&tmp, &pin_page_control->pin_page_inactive_list, cur);
+ 		list_splice_tail(&tmp, &pin_page_control->pin_page_active_list);
+ 		pin_page_control->cur_pin_active_pages = next_pin_active_pages;
+		pin_page_control->cur_pin_inactive_pages = next_pin_inactive_pages;
+	}
+ 	return;
+}
+
+/*
+ * zhengwei_thesis
+ * is_real_time_file_page - Check if the page belongs to the soft real-time task, and also
+ * a file page.
+ * @pin_page_control: the pin page set
+ */
+struct pin_page_control *is_real_time_file_page(struct page *page) {
+    struct address_space *mapping = page_mapping(page);
+    if (!mapping || !page_is_file_lru(page) || mapping->is_real_time == -1)
+        return NULL;
+    if (mapping->is_real_time == 1 && mapping->pin_page_control != NULL) return mapping->pin_page_control;
+		return NULL;
+}
+
+/*
  * shrink_active_list() moves pages from the active LRU to the inactive LRU.
  *
  * We move them the other way if the page is referenced by one or more
@@ -2083,8 +2249,44 @@ static void shrink_active_list(unsigned long nr_to_scan,
 				list_add(&page->lru, &l_active);
 				continue;
 			}
-		}
+			if (PageAnon(page) && PageSwapBacked(page)) {
+				struct anon_vma *anon_vma = page_anon_vma(page);
+				if (anon_vma != NULL && anon_vma->is_real_time == 1 && anon_vma->pin_page_control != NULL) {
+					int cur_pin_pages = anon_vma->pin_page_control->cur_pin_active_pages + anon_vma->pin_page_control->cur_pin_inactive_pages;
+					if (anon_vma->pin_page_control->lruvec == NULL) {
+						spin_lock_irq(&lruvec->lru_lock);
+						anon_vma->pin_page_control->lruvec = lruvec;
+						anon_vma->pin_page_control->mem_cgroup = sc->target_mem_cgroup;
+						spin_unlock_irq(&lruvec->lru_lock);
+					}
+					if (cur_pin_pages >= (anon_vma->pin_page_control->max_pin_pages/10*9)) {
+						spin_lock_irq(&anon_vma->pin_page_control->lruvec->lru_lock);
+						drop(anon_vma->pin_page_control, &l_active);
+						balance(anon_vma->pin_page_control);
+						del_victim_pages(anon_vma->pin_page_control, &l_inactive, &l_active);
+						spin_unlock_irq(&anon_vma->pin_page_control->lruvec->lru_lock);
+					}
 
+					if (cur_pin_pages >= anon_vma->pin_page_control->max_pin_pages) goto skip_pin;
+					ClearPageActive(page);
+					spin_lock_irq(&anon_vma->pin_page_control->lruvec->lru_lock);
+					insert_page_to_control(anon_vma->pin_page_control, page);
+					spin_unlock_irq(&anon_vma->pin_page_control->lruvec->lru_lock);
+					continue;
+				}
+			} else if (page_is_file_lru(page)) {
+				struct pin_page_control *pin_page_control = is_real_time_file_page(page);
+				if (pin_page_control != NULL) {
+					int cur_pin_pages = pin_page_control->cur_pin_active_pages + pin_page_control->cur_pin_inactive_pages;
+					ClearPageActive(page);
+					spin_lock_irq(&lruvec->lru_lock);
+					insert_page_to_control(pin_page_control, page);
+					spin_unlock_irq(&lruvec->lru_lock);
+					continue;
+				}
+			}
+		}
+skip_pin:
 		ClearPageActive(page);	/* we are de-activating */
 		SetPageWorkingset(page);
 		list_add(&page->lru, &l_inactive);
