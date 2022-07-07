@@ -1113,7 +1113,7 @@ static void update_dl_entity(struct sched_dl_entity *dl_se)
                                                             dl_se,
                                                             MEET_DEADLINE);
             update_pin_page_control(&dl_se->pin_page_control_file, dl_se, pin_list_adjustment);
-            try_decrease_budget(dl_se);
+            //try_decrease_budget(dl_se);
         }
 		/* Reset the last period and last budget if it is overflow or meet deadline. */
 
@@ -1482,7 +1482,7 @@ throttle:
             update_pin_page_control(&dl_se->pin_page_control_file,
                                                             dl_se,
                                                             pin_page_adjustment);
-            try_increase_budget(dl_se);
+            //try_increase_budget(dl_se);
             reset_pin_page_info(dl_se, &dl_se->pin_page_control_anon);
             reset_pin_page_info(dl_se, &dl_se->pin_page_control_file);
        	}
