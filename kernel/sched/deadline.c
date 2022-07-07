@@ -2748,6 +2748,7 @@ void __setparam_dl(struct task_struct *p, const struct sched_attr *attr)
 	dl_se->flags = attr->sched_flags;
 	dl_se->dl_bw = to_ratio(dl_se->dl_period, dl_se->dl_runtime);
 	dl_se->dl_density = to_ratio(dl_se->dl_deadline, dl_se->dl_runtime);
+	dl_se->dl_major_fault = 0;
 }
 
 void __getparam_dl(struct task_struct *p, struct sched_attr *attr)

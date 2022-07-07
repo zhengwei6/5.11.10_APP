@@ -1322,6 +1322,10 @@ static void mm_release(struct task_struct *tsk, struct mm_struct *mm)
 
 void exit_mm_release(struct task_struct *tsk, struct mm_struct *mm)
 {
+	if (mm != NULL && mm->owner != NULL && mm->owner->dl.dl_runtime > 0) {
+		printk("%d\n", mm->owner->dl.dl_major_fault);
+	}
+
 	futex_exit_release(tsk);
 	mm_release(tsk, mm);
 }
