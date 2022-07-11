@@ -97,31 +97,6 @@ check_adjust_pin_control(struct pin_page_control *pin_page_control,
 
 /**
  * zhengwei_thesis
- * update_pin_page_control - update the pin capacity in the pin page set
- * @pin_page_control: the pin page set
- * @dl_se: the soft real-time task
- * @adjustment: the adjustment to the pin capacity
- */
-void update_pin_page_control(struct pin_page_control *pin_page_control,
-                                                       struct sched_dl_entity *dl_se,
-                                               enum pin_list_adjustment adjustment)
-{
-       spin_lock(&pin_page_control->pin_page_lock);
-       switch (adjustment) {
-               case LIST_SHRINK:
-                       pin_page_control->max_pin_pages = pin_page_control->max_pin_pages * 9 / 10;
-                       break;
-               case LIST_INCREASE:
-                       pin_page_control->max_pin_pages = pin_page_control->max_pin_pages + dl_se->dl_major_fault;
-                       break;
-               default:
-                       break;
-       }
-       spin_unlock(&pin_page_control->pin_page_lock);
-}
-
-/**
- * zhengwei_thesis
  * reset_pin_page_info - clear the number of major fault of soft real-time task
  * @dl_se: the soft real-time task
  * @pin_page_control: the pin page set
@@ -1097,22 +1072,18 @@ static void update_dl_entity(struct sched_dl_entity *dl_se)
             pin_list_adjustment = check_adjust_pin_control(&dl_se->pin_page_control_anon,
                                                             dl_se,
                                                         	MISS_DEADLINE);
-            update_pin_page_control(&dl_se->pin_page_control_anon, dl_se, pin_list_adjustment);
 
             pin_list_adjustment = check_adjust_pin_control(&dl_se->pin_page_control_file,
                                                             dl_se,
                                                             MISS_DEADLINE);
-            update_pin_page_control(&dl_se->pin_page_control_file, dl_se, pin_list_adjustment);
         } else {
             pin_list_adjustment = check_adjust_pin_control(&dl_se->pin_page_control_anon,
                                                             dl_se,
                                                             MEET_DEADLINE);
-            update_pin_page_control(&dl_se->pin_page_control_anon, dl_se, pin_list_adjustment);
 
             pin_list_adjustment = check_adjust_pin_control(&dl_se->pin_page_control_file,
                                                             dl_se,
                                                             MEET_DEADLINE);
-            update_pin_page_control(&dl_se->pin_page_control_file, dl_se, pin_list_adjustment);
             //try_decrease_budget(dl_se);
         }
 		/* Reset the last period and last budget if it is overflow or meet deadline. */
@@ -1473,15 +1444,9 @@ throttle:
             pin_page_adjustment = check_adjust_pin_control(&dl_se->pin_page_control_anon,
                                                         	dl_se,
                                                             MISS_DEADLINE);
-            update_pin_page_control(&dl_se->pin_page_control_anon,
-                                                            dl_se,
-                                                            pin_page_adjustment);
             pin_page_adjustment = check_adjust_pin_control(&dl_se->pin_page_control_file,
                                                             dl_se,
                                                             MISS_DEADLINE);
-            update_pin_page_control(&dl_se->pin_page_control_file,
-                                                            dl_se,
-                                                            pin_page_adjustment);
             //try_increase_budget(dl_se);
             reset_pin_page_info(dl_se, &dl_se->pin_page_control_anon);
             reset_pin_page_info(dl_se, &dl_se->pin_page_control_file);

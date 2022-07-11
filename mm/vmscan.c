@@ -2259,13 +2259,6 @@ static void shrink_active_list(unsigned long nr_to_scan,
 						anon_vma->pin_page_control->mem_cgroup = sc->target_mem_cgroup;
 						spin_unlock_irq(&lruvec->lru_lock);
 					}
-					if (cur_pin_pages >= (anon_vma->pin_page_control->max_pin_pages/10*9)) {
-						spin_lock_irq(&anon_vma->pin_page_control->lruvec->lru_lock);
-						drop(anon_vma->pin_page_control, &l_active);
-						balance(anon_vma->pin_page_control);
-						del_victim_pages(anon_vma->pin_page_control, &l_inactive, &l_active);
-						spin_unlock_irq(&anon_vma->pin_page_control->lruvec->lru_lock);
-					}
 
 					if (cur_pin_pages >= anon_vma->pin_page_control->max_pin_pages) goto skip_pin;
 					ClearPageActive(page);
